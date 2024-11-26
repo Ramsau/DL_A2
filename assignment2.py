@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, CosineAnnealingLR, CosineAnnealingWarmRestarts
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, ConcatDataset
 from threading import Thread
 
 
@@ -139,13 +139,26 @@ class NeuralNet(nn.Module):
     def forward(self,x):
         return self.layers(x)
 
-def train(model, optimizer, loss_fn, train_loader, num_epochs, X_val_tensor, y_val_tensor, label=None, scheduler=None):
+def train(model,
+          optimizer,
+          loss_fn,
+          train_loader,
+          num_epochs,
+          X_val_tensor,
+          y_val_tensor,
+          label=None,
+          scheduler=None,
+          early_stopping=False,
+          patience=10):
     epoch_losses_train = []
     epoch_losses_val = []
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # try-except block to let user exit learning with Ctrl-C
     try:
+        best_validation_loss = float("inf")
+        best_model = None
+        improved_epoch = 0
         for epoch in range(num_epochs):
             print(f'{label}: Epoch number {epoch}')
 
@@ -184,8 +197,20 @@ def train(model, optimizer, loss_fn, train_loader, num_epochs, X_val_tensor, y_v
             print(f'Validation set: Average loss: {valdiation_loss}')
             epoch_losses_val.append(valdiation_loss)
 
-            if epoch % 20 == 0:
-                plot_losses(epoch_losses_train, epoch_losses_val, label + f" Epoch {epoch}")
+            # early stopping
+            if early_stopping:
+                if valdiation_loss < best_validation_loss:
+                    best_validation_loss = valdiation_loss
+                    best_model = model.state_dict()
+                    improved_epoch = epoch
+                else:
+                    if epoch - improved_epoch > patience:
+                        model.load_state_dict(best_model)
+                        break
+
+
+            # if epoch % 20 == 0:
+            #     plot_losses(epoch_losses_train, epoch_losses_val, label + f" Epoch {epoch}")
 
     except KeyboardInterrupt:
         pass
@@ -263,12 +288,12 @@ if __name__ == "__main__":
     X_val_tensor = torch.tensor(X_val_normalized).float()
     y_val_tensor = torch.tensor(y_val).float()
     X_test_tensor = torch.tensor(X_test_normalized).float()
-    y_text_tensor = torch.tensor(y_test).float()
+    y_test_tensor = torch.tensor(y_test).float()
 
     # train all 5 models
     # for model_selected_opt in range(len(models)):
     #     model = models[model_selected_opt]()
-    #     train(
+    #     losses_train, losses_val = train(
     #             model,
     #             optimizers[optimizer_selected](model.parameters(), learning_rate),
     #             loss_fn,
@@ -369,7 +394,7 @@ if __name__ == "__main__":
     # for scheduler_opt in range(len(schedulers)):
     #     model = models[model_selected]()
     #     optimizer = optimizers[optimizer_selected](model.parameters(), learning_rate)
-    #     scheduder = schedulers[scheduler_opt](optimizer)
+    #     scheduler = schedulers[scheduler_opt](optimizer)
     #     losses_train, losses_val = train(
     #         model,
     #         optimizer,
@@ -379,7 +404,7 @@ if __name__ == "__main__":
     #         X_val_tensor,
     #         y_val_tensor,
     #         f"Scheduler {scheduler_opt}",
-    #         scheduler = scheduder
+    #         scheduler = scheduler
     #     )
     #
     #     print(f"Scheduler {scheduler_opt}: {losses_train[-1]:.4f}/{losses_val[-1]:.4f}")
@@ -401,15 +426,51 @@ if __name__ == "__main__":
     model = models[model_selected]()
     optimizer = optimizers[optimizer_selected](model.parameters(), learning_rate=learning_rate)
     scheduler = schedulers[scheduler_selected](optimizer)
-    losses_train, losses_val =  train(
-        model,
-        optimizer,
-        loss_fn,
-        train_loader,
-        num_epochs,
-        X_val_tensor,
-        y_val_tensor,
-        f"Final Model",
-        scheduler = scheduler
-    )
-    print(f"Final Model: {losses_train[-1]:.4f}/{losses_val[-1]:.4f}" )
+
+    train_loader = get_loader(ConcatDataset([X_train_normalized, X_val_normalized]), ConcatDataset([y_train, y_val]), batch_size)
+
+
+    # You can load the saved model state here
+    model.load_state_dict(torch.load("output/Final Weights.npy"))
+
+    # losses_train, losses_val =  train(
+    #     model,
+    #     optimizer,
+    #     loss_fn,
+    #     train_loader,
+    #     num_epochs,
+    #     X_test_tensor,
+    #     y_test_tensor,
+    #     f"Final Model",
+    #     scheduler = scheduler,
+    #     early_stopping = True,
+    #     patience = 15,
+    # )
+    # print(f"Final Model: {losses_train[-1]:.4f}/{losses_val[-1]:.4f}" )
+    # torch.save(model.state_dict(), "output/Final Weights.npy")
+
+    '''
+    Final Model:
+    num_epochs = 75 (early stopping)
+    batch_size = 100
+    model = 3
+    optimizer = Adam
+    scheduler = Cosine Annealing
+    
+    Final Loss (Train/Test): 0.1842/0.2486
+    '''
+
+    model.eval()
+    estimations = model(X_test_tensor).flatten().detach()
+
+    plt.scatter(estimations, y_test)
+    plt.xlabel("Estimated House Value")
+    plt.ylabel("Actual House Value")
+    plt.title("Evaluation of Final Model")
+
+    plt.savefig("output/Evaluation.png")
+    plt.show()
+
+
+
+
