@@ -7,7 +7,9 @@ import seaborn as sns
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import StepLR, MultiStepLR, CosineAnnealingLR, CosineAnnealingWarmRestarts
 from torch.utils.data import DataLoader, TensorDataset
+from threading import Thread
 
 
 ##########################          Task a)         ########################## 
@@ -15,10 +17,10 @@ from torch.utils.data import DataLoader, TensorDataset
 def get_data():
     # split data into training set and test set
     X, y = fetch_california_housing(return_X_y=True)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=302)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=302)
 
-    # split training set into proper training set and validation set
-    X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.16, random_state=17)
+    # split test set into proper test set and validation set (evenly)
+    X_test, X_val, y_test, y_val = train_test_split(X_test, y_test, test_size=0.5, random_state=17)
 
     return X, X_train, X_val, X_test, y, y_train, y_val, y_test
 
@@ -114,64 +116,140 @@ def loss_fn(y_pred, y_true):
 
 
 class NeuralNet(nn.Module):
-    def __init__(self):
+    def __init__(self, dimensions):
       super(NeuralNet, self).__init__()
-      self.fc1 = nn.Linear(in_features=8, out_features=64) 
-      self.fc2 = nn.Linear(in_features=64, out_features=64)
-      self.fc3 = nn.Linear(in_features=64, out_features=1)
+
+      # build architecture: input and output size are fixed to 8 and 1
+      # input: 8 features
+      layer_setup = [
+          nn.Linear(8, dimensions[0]),
+          nn.ReLU(),
+      ]
+      # build layers dynamically
+      for i in range(1, len(dimensions)):
+          layer_setup.append(nn.Linear(dimensions[i-1], dimensions[i]))
+          layer_setup.append(nn.ReLU())
+      # output: 1 feature
+      layer_setup.append(nn.Linear(dimensions[-1], 1))
+
+      self.layers = nn.Sequential(
+          *layer_setup
+      )
 
     def forward(self,x):
-        x = self.fc1(x)
-        x = F.relu(x)
+        return self.layers(x)
 
-        x = self.fc2(x)
-        x = F.relu(x)
+def train(model, optimizer, loss_fn, train_loader, num_epochs, X_val_tensor, y_val_tensor, label=None, scheduler=None):
+    epoch_losses_train = []
+    epoch_losses_val = []
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        x = self.fc3(x)
+    # try-except block to let user exit learning with Ctrl-C
+    try:
+        for epoch in range(num_epochs):
+            print(f'{label}: Epoch number {epoch}')
 
-        return x
-    
-def train(model, optimizer, loss_fn, train_loader, num_epochs, X_val_tensor, y_val_tensor):
-    losses = []
-    for epoch in range(num_epochs):
-        print(f'Epoch number {epoch}')
+            # train with mini batches
+            model.train()
+            losses = []
+            for batch_idx, (data, target) in enumerate(train_loader):
+                data, target = data.to(device), target.to(device)
 
-        # train with mini batches
-        model.train()
-        for batch_idx, (data, target) in enumerate(train_loader):
+                optimizer.zero_grad()
 
-            outputs = model(data)
-            loss = loss_fn(outputs, target)
-            losses.append(loss.item())
+                outputs = model(data).flatten()
+                loss = loss_fn(outputs, target)
+                losses.append(loss.item())
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                loss.backward()
+                optimizer.step()
 
-        print(f'\nAverage train loss in epoch {epoch}: {np.mean(losses[-len(train_loader):])}')
+            train_epoch_loss = np.mean(losses)
+            print(f'\nAverage train loss in epoch {epoch}: {train_epoch_loss}')
+            epoch_losses_train.append(train_epoch_loss)
+            if scheduler is not None:
+                scheduler.step()
 
 
-        # validate without batches
-        model.eval()
-        valdiation_loss = 0
+            # validate without batches
+            model.eval()
+            valdiation_loss = 0
 
-        with torch.no_grad():
-            for data, target in zip(X_val_tensor, y_val_tensor):
-                output = model(data)
-                valdiation_loss += loss_fn(output, target)
+            with torch.no_grad():
+                for data, target in zip(X_val_tensor, y_val_tensor):
+                    output = model(data)
+                    valdiation_loss += loss_fn(output, target)
 
-        valdiation_loss /= len(X_val_normalized)
-        print(f'Validation set: Average loss: {valdiation_loss}')
+            valdiation_loss /= len(X_val_tensor)
+            print(f'Validation set: Average loss: {valdiation_loss}')
+            epoch_losses_val.append(valdiation_loss)
+
+            if epoch % 20 == 0:
+                plot_losses(epoch_losses_train, epoch_losses_val, label + f" Epoch {epoch}")
+
+    except KeyboardInterrupt:
+        pass
+
+    if label is not None:
+        plot_losses(epoch_losses_train, epoch_losses_val, label)
+
+        with open(f"output/{label}.npy", "wb+") as f:
+            np.save(f, epoch_losses_train)
+            np.save(f, epoch_losses_val)
+
+    return epoch_losses_train, epoch_losses_val
  
 
+def plot_losses(epoch_losses_train, epoch_losses_val, title):
+    plt.plot(epoch_losses_train, 'r-', label='Training Loss')
+    plt.plot(epoch_losses_val, 'b-', label='Validation loss')
+
+    # Add titles and labels
+    plt.title(title)
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+
+    # Add a legend
+    plt.legend()
+
+    # Display the plot
+    plt.savefig(f"output/{title}.png")
+    plt.show()
+
+
 if __name__ == "__main__":
-    # settings
-    learning_rate = 0.001
-    num_epochs = 10
-    batch_size = 10
+    # ensure deterministic behaviour
     torch.manual_seed(42)
-    model = NeuralNet()
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    torch.autograd.set_detect_anomaly(True)
+
+    # hyperparameters
+    learning_rate = 0.003
+    num_epochs = 200
+    batch_size = 100
+    models = [
+        lambda: NeuralNet([1024]),
+        lambda: NeuralNet([64, 64]),
+        lambda: NeuralNet([64, 64, 64, 64]),
+        lambda: NeuralNet([64, 128, 128, 128, 64]),
+        lambda: NeuralNet([16] * 10),
+    ]
+    optimizers = [
+        lambda params, learning_rate: torch.optim.SGD(params, lr=learning_rate),
+        lambda params, learning_rate: torch.optim.SGD(params, lr=learning_rate, momentum=0.9),
+        lambda params, learning_rate: torch.optim.SGD(params, lr=learning_rate, momentum=0.9, nesterov=True),
+        lambda params, learning_rate: torch.optim.Adam(params, lr=learning_rate),
+        lambda params, learning_rate: torch.optim.RMSprop(params, lr=learning_rate),
+    ]
+    schedulers = [
+        lambda optimizer: StepLR(optimizer, step_size=5, gamma=0.1),
+        lambda optimizer: MultiStepLR(optimizer, milestones=[5, 20, 40], gamma=0.1),
+        lambda optimizer: CosineAnnealingLR(optimizer, T_max=num_epochs),
+        lambda optimizer: CosineAnnealingWarmRestarts(optimizer, T_0=10, eta_min=1e-6),
+    ]
+
+    model_selected = 3
+    optimizer_selected = 3
+    scheduler_selected = 3
 
     # setup
     X, X_train, X_val, X_test, y, y_train, y_val, y_test = get_data()
@@ -187,7 +265,151 @@ if __name__ == "__main__":
     X_test_tensor = torch.tensor(X_test_normalized).float()
     y_text_tensor = torch.tensor(y_test).float()
 
-    # train
-    train(model, optimizer, loss_fn, train_loader, num_epochs, X_val_tensor, y_val_tensor)
+    # train all 5 models
+    # for model_selected_opt in range(len(models)):
+    #     model = models[model_selected_opt]()
+    #     train(
+    #             model,
+    #             optimizers[optimizer_selected](model.parameters(), learning_rate),
+    #             loss_fn,
+    #             train_loader,
+    #             num_epochs,
+    #             X_val_tensor,
+    #             y_val_tensor,
+    #             f"Model {model_selected_opt}"
+    #     )
+    #     print(f"Model {model_selected_opt}: {losses_train[-1]}/{losses_val[-1]}")
+    '''
+    Comparison of models:
+    lr = 0.003
+    num_epochs = 50
+    batch_size = 100
+    optimizer = SGD
+    
+    Final Loss: Train/Validation
+    Model 0: 0.3739/0.3998
+    Model 1: 0.3924/0.4058
+    Model 2: 0.3595/0.3753
+    Model 3: 0.3559/0.3667 *
+    Model 4: 1.3381/1.3211
+    '''
+
+    # for optimizer_selected_opt in range(len(optimizers)):
+    #     model = models[model_selected]()
+    #     losses_train, losses_val = train(
+    #         model,
+    #         optimizers[optimizer_selected_opt](model.parameters(), learning_rate),
+    #         loss_fn,
+    #         train_loader,
+    #         num_epochs,
+    #         X_val_tensor,
+    #         y_val_tensor,
+    #         f"Optimizer {optimizer_selected_opt}"
+    #     )
+    #
+    #     print(f"Optimizer {optimizer_selected_opt}: {losses_train[-1]}/{losses_val[-1]}")
+
+    '''
+    
+    Comparison of optimizers:
+    lr = 0.003
+    num_epochs = 50
+    batch_size = 100
+    model = 3
+    
+    Final Loss: Train/Validation
+    Optimizer 0: 0.3545/0.3601
+    Optimizer 1: 0.2555/0.2908
+    Optimizer 2: 0.2520/0.3014
+    Optimizer 3: 0.2053/0.2796 *
+    Optimizer 4: 0.1958/0.3469
+    '''
+
+    # for learning_rate_opt in [0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001, 0.0005, 0.0002, 0.0001, 0.00005, 0.00002, 0.00001]:
+    #     model = models[model_selected]()
+    #     losses_train, losses_val = train(
+    #         model,
+    #         optimizers[optimizer_selected](model.parameters(), learning_rate),
+    #         loss_fn,
+    #         train_loader,
+    #         num_epochs,
+    #         X_val_tensor,
+    #         y_val_tensor,
+    #         f"Learning rate {learning_rate_opt}"
+    #     )
+    #
+    #     print(f"Learning rate {learning_rate_opt}: {losses_train[-1]:.4f}/{losses_val[-1]:.4f}")
 
 
+    '''
+    Comparison of learning rates:
+    num_epochs = 50
+    batch_size = 100
+    model = 3
+    optimizer = Adam
+    
+    Final Loss: Train/Validation
+    Learning rate 0.5: 0.2176/0.2945
+    Learning rate 0.2: 0.2046/0.2816
+    Learning rate 0.1: 0.2030/0.2768
+    Learning rate 0.05: 0.2053/0.2796
+    Learning rate 0.02: 0.2177/0.2945
+    Learning rate 0.01: 0.2046/0.2816
+    Learning rate 0.005: 0.2030/0.2768
+    Learning rate 0.002: 0.2053/0.2796
+    Learning rate 0.001: 0.2012/0.2776
+    Learning rate 0.0005: 0.2056/0.2751
+    Learning rate 0.0002: 0.2172/0.3007
+    Learning rate 0.0001: 0.2322/0.2725
+    Learning rate 5e-05: 0.2176/0.2945
+    Learning rate 2e-05: 0.2046/0.2816
+    Learning rate 1e-05: 0.2029/0.2768
+    '''
+
+    # for scheduler_opt in range(len(schedulers)):
+    #     model = models[model_selected]()
+    #     optimizer = optimizers[optimizer_selected](model.parameters(), learning_rate)
+    #     scheduder = schedulers[scheduler_opt](optimizer)
+    #     losses_train, losses_val = train(
+    #         model,
+    #         optimizer,
+    #         loss_fn,
+    #         train_loader,
+    #         num_epochs,
+    #         X_val_tensor,
+    #         y_val_tensor,
+    #         f"Scheduler {scheduler_opt}",
+    #         scheduler = scheduder
+    #     )
+    #
+    #     print(f"Scheduler {scheduler_opt}: {losses_train[-1]:.4f}/{losses_val[-1]:.4f}")
+
+    '''
+    Comparison of Schedulers:
+    num_epochs = 50
+    batch_size = 100
+    model = 3
+    optimizer = Adam
+    
+    Final Loss: Train/Validation
+    Scheduler 0: 0.2871/0.3082
+    Scheduler 1: 0.2526/0.2865
+    Scheduler 2: 0.1843/0.2709
+    Scheduler 3: 0.1988/0.2581 *
+    '''
+
+    model = models[model_selected]()
+    optimizer = optimizers[optimizer_selected](model.parameters(), learning_rate=learning_rate)
+    scheduler = schedulers[scheduler_selected](optimizer)
+    losses_train, losses_val =  train(
+        model,
+        optimizer,
+        loss_fn,
+        train_loader,
+        num_epochs,
+        X_val_tensor,
+        y_val_tensor,
+        f"Final Model",
+        scheduler = scheduler
+    )
+    print(f"Final Model: {losses_train[-1]:.4f}/{losses_val[-1]:.4f}" )
