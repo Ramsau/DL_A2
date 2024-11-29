@@ -474,3 +474,88 @@ if __name__ == "__main__":
 
 
 
+##########################          Task f)         ########################## 
+
+# transforming above architecture to binary classification architecture within
+# least possible steps
+
+def get_data_binary():
+    # split data into training set and test set
+    X, y = fetch_california_housing(return_X_y=True)
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=302)
+    # assign labels to target variables
+    y_train[y_train < 2], y_test[y_test < 2] = 0, 0
+    y_train[y_train >= 2], y_test[y_test >= 2] = 1, 1
+
+
+    return X, X_train, X_test, y, y_train, y_test
+
+
+class NeuralNetBinary(nn.Module):
+    def __init__(self, dimensions):
+      super(NeuralNetBinary, self).__init__()
+
+      # build architecture: input and output size are fixed to 8 and 2
+      # input: 8 features
+      layer_setup = [
+          nn.Linear(8, dimensions[0]),
+          nn.ReLU(),
+      ]
+      # build layers dynamically
+      for i in range(1, len(dimensions)):
+          layer_setup.append(nn.Linear(dimensions[i-1], dimensions[i]))
+          layer_setup.append(nn.ReLU())
+      # output: Still 1 output feature because of binary classification
+      layer_setup.append(nn.Linear(dimensions[-1], 1))
+
+      # added Sigmoid activation function for classification
+      layer_setup.append(nn.Sigmoid())
+      
+      self.layers = nn.Sequential(
+          *layer_setup
+      )
+
+    def forward(self,x):
+        return self.layers(x)
+
+print(f'Training Binary Model now')
+
+# setup
+X, X_train, X_test, y, y_train, y_test = get_data_binary()
+
+X_train_normalized, X_val_normalized, X_test_normalized = normalize_data(X_train, X_val, X_test)
+train_loader = get_loader(X_train_normalized, y_train, batch_size)
+
+X_test_tensor = torch.tensor(X_test_normalized).float()
+y_test_tensor = torch.tensor(y_test).float().unsqueeze(1)
+
+
+# loss function that is usable for binary classification task
+loss_function = nn.BCELoss()
+
+# reconstructing the Final Model from above task
+
+num_epochs = 75
+early_stopping = True
+model = NeuralNetBinary([64, 128, 128, 128, 64])
+optimizer = optimizers[optimizer_selected](model.parameters(), learning_rate=0.003)
+label = f'Final Model Binary Classification'
+scheduler = schedulers[scheduler_selected](optimizer)
+patience = 15
+
+# train single model for  binary classification task using the whole training set and evaluate on the test set
+losses_train, losses_val = train(
+    model,
+    optimizer,
+    loss_function,
+    train_loader,
+    num_epochs,
+    X_test_tensor,
+    y_test_tensor,
+    label,
+    scheduler,
+    early_stopping,
+    patience
+)
+
