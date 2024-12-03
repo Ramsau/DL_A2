@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, CosineAnnealingLR, CosineAnnealingWarmRestarts
 from torch.utils.data import DataLoader, TensorDataset, ConcatDataset
 from threading import Thread
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
 
 ##########################          Task a)         ########################## 
@@ -488,16 +489,16 @@ def get_data_binary():
     y_train[y_train < 2], y_test[y_test < 2] = 0, 0
     y_train[y_train >= 2], y_test[y_test >= 2] = 1, 1
 
+    X_test, X_val, y_test, y_val = train_test_split(X_test, y_test, test_size=0.5, random_state=17)
 
-    return X, X_train, X_test, y, y_train, y_test
+    return X, X_train, X_test, X_val, y, y_train, y_test, y_val
 
 
 class NeuralNetBinary(nn.Module):
     def __init__(self, dimensions):
       super(NeuralNetBinary, self).__init__()
 
-      # build architecture: input and output size are fixed to 8 and 2
-      # input: 8 features
+      # build architecture: input and output size are fixed to 8 and 1
       layer_setup = [
           nn.Linear(8, dimensions[0]),
           nn.ReLU(),
@@ -522,20 +523,20 @@ class NeuralNetBinary(nn.Module):
 print(f'Training Binary Model now')
 
 # setup
-X, X_train, X_test, y, y_train, y_test = get_data_binary()
+X, X_train, X_test, X_val, y, y_train, y_test, y_val = get_data_binary()
 
 X_train_normalized, X_val_normalized, X_test_normalized = normalize_data(X_train, X_val, X_test)
 train_loader = get_loader(X_train_normalized, y_train, batch_size)
 
 X_test_tensor = torch.tensor(X_test_normalized).float()
 y_test_tensor = torch.tensor(y_test).float().unsqueeze(1)
-
+X_val_tensor = torch.tensor(X_val_normalized).float()
+y_val_tensor = torch.tensor(y_val).float().unsqueeze(1)
 
 # loss function that is usable for binary classification task
 loss_function = nn.BCELoss()
 
 # reconstructing the Final Model from above task
-
 num_epochs = 75
 early_stopping = True
 model = NeuralNetBinary([64, 128, 128, 128, 64])
@@ -544,18 +545,26 @@ label = f'Final Model Binary Classification'
 scheduler = schedulers[scheduler_selected](optimizer)
 patience = 15
 
-# train single model for  binary classification task using the whole training set and evaluate on the test set
+# train single model for binary classification task using training and validation set
 losses_train, losses_val = train(
     model,
     optimizer,
     loss_function,
     train_loader,
     num_epochs,
-    X_test_tensor,
-    y_test_tensor,
+    X_val_tensor,
+    y_val_tensor,
     label,
     scheduler,
     early_stopping,
     patience
 )
 
+model.eval()
+estimations = model(X_test_tensor).detach().numpy()
+estimations_labels = (estimations >= 0.5).astype(int)
+    
+cm = confusion_matrix(y_test_tensor.numpy(), estimations_labels)
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Avg House Val < 200,000", "Avg House Val >= 200,000"])
+disp.plot(cmap='Blues')
+plt.show()
